@@ -115,13 +115,20 @@ def load_benchmark(
         base = Path(data_dir) if data_dir is not None else _DEFAULT_DATA_DIR
         path = base / f"{stem}.jsonl"
         if not path.exists():
-            raise FileNotFoundError(
-                f"Dataset file not found: {path}\n"
-                f"Run  python -m odia_trans --dataset {stem.removeprefix('odia-')} merge  "
-                f"inside cursor_translate/ to generate it, or pass "
-                f"hf_repo='default' to pull from {DEFAULT_HF_REPOS[name]}."
-            )
-        rows = _load_jsonl(path)
+            # Auto-fallback: try the Hub before raising
+            try:
+                rows = _load_from_hub(DEFAULT_HF_REPOS[name], name)
+            except Exception:
+                raise FileNotFoundError(
+                    f"Dataset file not found: {path}\n"
+                    f"Run  python -m odia_trans --dataset "
+                    f"{stem.removeprefix('odia-')} merge  "
+                    f"inside cursor_translate/ to generate it, or pass "
+                    f"hf_repo='default' to pull from "
+                    f"{DEFAULT_HF_REPOS[name]}."
+                )
+        else:
+            rows = _load_jsonl(path)
 
     return _sample(rows, n_samples, seed)
 
