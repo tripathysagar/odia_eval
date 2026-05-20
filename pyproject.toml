@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "odia_eval"
+version = "0.2.0"
+description = "Evaluation library for OdiaBench — load, prompt, score, and report on 5 translated Odia reasoning benchmarks (GSM8K, ARC, TruthfulQA, Winogrande, HellaSwag)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Sagar Tripathy", email = "tripathysagar08@gmail.com" },
+]
+keywords = ["odia", "indic", "llm", "evaluation", "benchmark", "nlp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Natural Language :: Other",
+]
+
+# Core has zero runtime deps — pure stdlib (re, random, json, pathlib,
+# dataclasses, statistics, typing).  Optional groups are listed below.
+dependencies = []
+
+[project.optional-dependencies]
+hub     = ["datasets>=2.18.0"]
+pandas  = ["pandas>=2.0.0"]
+model   = [
+    "torch>=2.2.0",
+    "transformers>=4.41.0",
+    "accelerate>=0.30.0",
+    "bitsandbytes>=0.43.0",
+]
+all     = [
+    "datasets>=2.18.0",
+    "pandas>=2.0.0",
+    "torch>=2.2.0",
+    "transformers>=4.41.0",
+    "accelerate>=0.30.0",
+    "bitsandbytes>=0.43.0",
+]
+
+[project.urls]
+Repository = "https://github.com/tripathysagar/odia_eval"
+"Parent project (OdiaBench)" = "https://github.com/tripathysagar/OdiaBench"
+"HuggingFace Hub" = "https://huggingface.co/tripathysagar"
+Issues = "https://github.com/tripathysagar/odia_eval/issues"
+
+# The repo root *is* the package — keep the flat layout so existing
+# `sys.path.insert(0, "OdiaBench")` workflows in the parent repo keep
+# working, while `pip install .` here still publishes `odia_eval`.
+[tool.setuptools]
+packages = ["odia_eval"]
+package-dir = { "odia_eval" = "." }
+
+[tool.setuptools.package-data]
+odia_eval = ["py.typed"]

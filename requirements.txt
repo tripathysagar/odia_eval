@@ -1,0 +1,25 @@
+# odia_eval — install requirements
+#
+# Core runtime: **none required** — odia_eval itself is pure stdlib
+# (re, random, json, pathlib, dataclasses, typing).  The sections below
+# are optional; install only the groups you actually need.
+#
+# ------------------------------------------------------------------
+# Optional: load benchmarks from HuggingFace Hub (load_benchmark(..., hf_repo=...))
+# ------------------------------------------------------------------
+datasets>=2.18.0
+
+# ------------------------------------------------------------------
+# Optional: export results to pandas / CSV (to_records → pd.DataFrame)
+# ------------------------------------------------------------------
+pandas>=2.0.0
+
+# ------------------------------------------------------------------
+# Optional: run the 4-bit quantised reference model from README.md
+# (Kaggle T4 / Colab).  These are *example* model-side deps, not used
+# by odia_eval itself — your own generate_fn may need a different set.
+# ------------------------------------------------------------------
+torch>=2.2.0
+transformers>=4.41.0
+accelerate>=0.30.0
+bitsandbytes>=0.43.0
