@@ -41,3 +41,6 @@ htmlcov/
 results/
 *.results.jsonl
 hf_cache/
+
+# Notebooks live in the parent OdiaBench repo, not in this package
+notebooks/
