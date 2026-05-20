@@ -131,7 +131,7 @@ Score one prediction. Returns `ScoreResult(correct, extracted, gold, prediction)
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
-MODEL_ID = "unsloth/gemma-4-E2B-it"   # Gemma 4 2B IT via Unsloth
+MODEL_ID = "google/gemma-4-E2B-it"    # Gemma 4 2B IT
 
 bnb_cfg = BitsAndBytesConfig(
     load_in_4bit=True,
