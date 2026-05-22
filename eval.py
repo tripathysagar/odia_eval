@@ -23,6 +23,7 @@ Typical usage
 """
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -57,6 +58,79 @@ def _strip_prompt(prediction: str, prompt: str) -> str:
     if idx >= 0:
         return prediction[idx + len(tail):]
     return prediction
+
+
+# ---------------------------------------------------------------------------
+# Test-time compute: majority-vote (self-consistency) aggregator
+# ---------------------------------------------------------------------------
+
+def _canonical_extracted(benchmark: str, extracted: str) -> str:
+    """Canonicalise an extracted answer for vote-grouping / comparison.
+
+    * ``gsm8k`` — parse as float so ``"1.5"``, ``"1.50"`` and ``"01.5"``
+      collapse to the same bucket (``"1.5"``).
+    * MCQ benchmarks (``arc``, ``truthfulqa``, ``hellaswag``) — uppercase
+      so ``"a"`` and ``"A"`` count as the same vote.
+    * ``winogrande`` — digit string, returned as-is after strip.
+    * Empty input returns ``""`` (treated as an abstention).
+    """
+    if not extracted:
+        return ""
+    s = extracted.strip()
+    if benchmark == "gsm8k":
+        try:
+            v = float(s.replace(",", ""))
+            return f"{v:g}"
+        except ValueError:
+            return s
+    if benchmark in ("arc", "truthfulqa", "hellaswag"):
+        return s.upper()
+    return s
+
+
+def _aggregate_majority_vote(
+    benchmark: str,
+    completions: list[str],
+    row: dict[str, Any],
+) -> ScoreResult:
+    """Score ``completions`` independently and return a majority-vote result.
+
+    Self-consistency (Wang et al., 2022) for benchmarks: sample N answers
+    per prompt, then pick the answer the model agreed on most often.
+    Ties are broken by first-seen order (``Counter.most_common`` is
+    stable on equal counts in CPython 3.7+).  Empty extractions are
+    abstentions — they never win.  If *every* completion abstains the
+    result is marked incorrect with ``extracted=""``.
+    """
+    if not completions:
+        return ScoreResult(correct=False, extracted="", gold="", prediction="")
+
+    per_sample = [score(benchmark, c, row) for c in completions]
+    gold = per_sample[0].gold
+
+    keys = [_canonical_extracted(benchmark, sr.extracted) for sr in per_sample]
+    non_empty = [k for k in keys if k]
+
+    if non_empty:
+        winner_key, _ = Counter(non_empty).most_common(1)[0]
+        winner_extracted = next(
+            sr.extracted for sr, k in zip(per_sample, keys) if k == winner_key
+        )
+        correct = (
+            bool(winner_key)
+            and winner_key == _canonical_extracted(benchmark, gold)
+        )
+    else:
+        winner_extracted = ""
+        correct = False
+
+    joined = "\n---\n".join(completions)
+    return ScoreResult(
+        correct=correct,
+        extracted=winner_extracted,
+        gold=gold,
+        prediction=joined[:512],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +182,9 @@ def run_eval(
     batch_size: int = 64,
     data_dir: str | Path | None = None,
     hf_repo: str | None = None,
+    reasoning: bool = False,
+    n_votes: int = 1,
+    sort_by_length: bool = False,
     verbose: bool = True,
 ) -> list[EvalRow]:
     """Evaluate ``generate_fn`` on one OdiaBench benchmark.
@@ -126,17 +203,42 @@ def run_eval(
     seed:
         Random seed for sampling (ignored when ``n_samples`` is ``None``).
     batch_size:
-        How many prompts to pass to ``generate_fn`` at once — applied
-        uniformly across every benchmark.  Default ``64`` works on a
-        16 GB T4 with a 2B 4-bit model; bump to ``128`` for 24 GB
+        How many *rows* per call to ``generate_fn``.  Default ``64`` works
+        on a 16 GB T4 with a 2B 4-bit model; bump to ``128`` for 24 GB
         cards (L4/A10G) or ``256`` for ≥40 GB (A100/H100).  Set to ``1``
-        when wrapping a non-batching API.
+        when wrapping a non-batching API.  Note: when ``n_votes > 1`` the
+        actual batch passed to ``generate_fn`` is ``batch_size * n_votes``
+        prompts — reduce ``batch_size`` accordingly to stay under GPU
+        memory.
     data_dir:
         Override the default local data directory.
     hf_repo:
         HuggingFace repo id to pull data from instead of local files.
         Pass ``"default"`` to resolve against the canonical
         ``tripathysagar/odia-*`` repos.
+    reasoning:
+        If ``True``, every prompt is wrapped with an Odia instruction
+        asking the model to think inside ``<think>...</think>`` and put
+        the final answer inside ``\\boxed{...}``.  Gives the model
+        scratchpad tokens to compute before committing, and lets the
+        scorers pull the answer from a deterministic location.  See
+        :func:`odia_eval.build_prompt` for details.
+    n_votes:
+        Test-time compute via **self-consistency** (Wang et al., 2022).
+        ``1`` (default) keeps the legacy one-completion-per-prompt path.
+        Values ``>1`` request ``n_votes`` independent completions per
+        prompt (the batch is replicated under the hood) and take a
+        majority vote over the extracted answers per row.  Requires
+        ``generate_fn`` to produce *stochastic* outputs (e.g.
+        ``do_sample=True, temperature=0.7``) — otherwise every vote is
+        identical and accuracy is unchanged.
+    sort_by_length:
+        If ``True``, sort prompts within each batch by ``len(prompt)``
+        descending before calling ``generate_fn``, then restore the original
+        row order before scoring.  With left-padded batches this cuts
+        padding/compute overhead when prompt lengths vary; results are
+        identical to ``sort_by_length=False`` for a deterministic
+        ``generate_fn``.
     verbose:
         Print a progress line after every batch.
 
@@ -147,6 +249,8 @@ def run_eval(
     """
     if benchmark not in BENCHMARKS:
         raise KeyError(f"unknown benchmark {benchmark!r}; expected one of {BENCHMARKS}")
+    if n_votes < 1:
+        raise ValueError(f"n_votes must be >= 1 (got {n_votes})")
 
     rows = load_benchmark(
         benchmark,
@@ -158,29 +262,82 @@ def run_eval(
     total = len(rows)
     results: list[EvalRow] = []
 
+    def _generate_ordered(prompt_list: list[str]) -> list[str]:
+        if not sort_by_length or len(prompt_list) <= 1:
+            return generate_fn(prompt_list)
+        order = sorted(
+            range(len(prompt_list)),
+            key=lambda i: len(prompt_list[i]),
+            reverse=True,
+        )
+        sorted_prompts = [prompt_list[i] for i in order]
+        sorted_preds = generate_fn(sorted_prompts)
+        if len(sorted_preds) != len(prompt_list):
+            raise ValueError(
+                f"generate_fn returned {len(sorted_preds)} outputs for "
+                f"{len(prompt_list)} prompts"
+            )
+        restored: list[str] = [""] * len(prompt_list)
+        for sorted_idx, orig_idx in enumerate(order):
+            restored[orig_idx] = sorted_preds[sorted_idx]
+        return restored
+
     for batch_start in range(0, total, batch_size):
         batch_rows = rows[batch_start : batch_start + batch_size]
-        prompts = [build_prompt(benchmark, row) for row in batch_rows]
-        predictions = generate_fn(prompts)
+        prompts = [
+            build_prompt(benchmark, row, reasoning=reasoning) for row in batch_rows
+        ]
 
-        for row, prompt, pred in zip(batch_rows, prompts, predictions):
-            completion = _strip_prompt(pred, prompt)
-            sr = score(benchmark, completion, row)
-            results.append(
-                EvalRow(
-                    benchmark=benchmark,
-                    row_id=row["id"],
-                    prompt=prompt,
-                    score_result=sr,
+        if n_votes == 1:
+            predictions = _generate_ordered(prompts)
+            if len(predictions) != len(prompts):
+                raise ValueError(
+                    f"generate_fn returned {len(predictions)} outputs for "
+                    f"{len(prompts)} prompts"
                 )
-            )
+            for row, prompt, pred in zip(batch_rows, prompts, predictions):
+                completion = _strip_prompt(pred, prompt)
+                sr = score(benchmark, completion, row)
+                results.append(
+                    EvalRow(
+                        benchmark=benchmark,
+                        row_id=row["id"],
+                        prompt=prompt,
+                        score_result=sr,
+                    )
+                )
+        else:
+            # Replicate each prompt n_votes times so a single generate_fn
+            # call covers the whole batch -- preserves any kv-cache /
+            # paged-attention batching the user has wired up.
+            expanded = [p for p in prompts for _ in range(n_votes)]
+            all_preds = _generate_ordered(expanded)
+            if len(all_preds) != len(expanded):
+                raise ValueError(
+                    f"generate_fn returned {len(all_preds)} outputs for "
+                    f"{len(expanded)} expanded prompts (batch_size="
+                    f"{len(prompts)} x n_votes={n_votes})"
+                )
+            for i, (row, prompt) in enumerate(zip(batch_rows, prompts)):
+                raw_chunk = all_preds[i * n_votes : (i + 1) * n_votes]
+                completions = [_strip_prompt(p, prompt) for p in raw_chunk]
+                sr = _aggregate_majority_vote(benchmark, completions, row)
+                results.append(
+                    EvalRow(
+                        benchmark=benchmark,
+                        row_id=row["id"],
+                        prompt=prompt,
+                        score_result=sr,
+                    )
+                )
 
         if verbose:
             done = min(batch_start + batch_size, total)
             correct_so_far = sum(r.correct for r in results)
             pct = 100 * correct_so_far / len(results)
+            vote_tag = f" (n_votes={n_votes})" if n_votes > 1 else ""
             print(
-                f"[{benchmark}] {done}/{total}  "
+                f"[{benchmark}{vote_tag}] {done}/{total}  "
                 f"acc so far: {correct_so_far}/{len(results)} ({pct:.1f}%)"
             )
 
@@ -199,6 +356,9 @@ def run_all(
     batch_size: int = 64,
     data_dir: str | Path | None = None,
     hf_repos: dict[str, str] | str | None = None,
+    reasoning: bool = False,
+    n_votes: int = 1,
+    sort_by_length: bool = False,
     verbose: bool = True,
     skip: list[str] | None = None,
 ) -> dict[str, list[EvalRow]]:
@@ -215,6 +375,14 @@ def run_all(
           ``tripathysagar/odia-*`` repos on HF Hub.
         * ``dict`` — per-benchmark mapping; benchmarks absent from the
           dict fall back to local files.
+    reasoning, n_votes, sort_by_length:
+        Forwarded to :func:`run_eval` for every benchmark.  See that
+        function's docstring for full semantics.  ``reasoning=True``
+        gives the model scratchpad time per prompt; ``n_votes>1`` samples
+        N independent completions per prompt and majority-votes the
+        extracted answer (self-consistency / test-time compute).
+        ``sort_by_length=True`` length-buckets each batch before
+        generation to reduce left-pad waste.
 
     Returns
     -------
@@ -239,6 +407,9 @@ def run_all(
             batch_size=batch_size,
             data_dir=data_dir,
             hf_repo=hf_repos.get(name),
+            reasoning=reasoning,
+            n_votes=n_votes,
+            sort_by_length=sort_by_length,
             verbose=verbose,
         )
 

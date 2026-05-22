@@ -55,6 +55,7 @@ from .eval import (
     full_report,
     to_records,
     _strip_prompt,
+    _aggregate_majority_vote,
 )
 from .analysis import (
     CHANCE_LEVELS,
@@ -65,11 +66,21 @@ from .analysis import (
 )
 from .io import save_results, load_results
 
+# 0.4.0 — Inference optimizations: FlashAttention-2 fallback chain,
+# MCQ early-stop on `\boxed{...}`, length-bucketed batching
+# (`sort_by_length`), opt-in static KV-cache + fullgraph compile, and
+# vLLM throughput recipe in the README.
+#
+# 0.3.0 — Adds reasoning prompts (`<think>...</think>` + `\boxed{...}`)
+# and test-time compute via self-consistency / majority voting
+# (`n_votes>1` in run_eval / run_all).  Scorers prefer `\boxed{...}`
+# content when present, with full backward-compatible fallback.
+#
 # 0.2.0 — TruthfulQA choices are now deterministically shuffled by row id
 # and several scorers were widened (ARC A-E, TFQA A-M, Odia digit/word
 # normalisation for Winogrande).  Any results stored under 0.1.0 should
 # be regenerated before being compared to 0.2.0+ runs.
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # datasets
@@ -92,6 +103,7 @@ __all__ = [
     "full_report",
     "to_records",
     "_strip_prompt",
+    "_aggregate_majority_vote",
     # analysis
     "CHANCE_LEVELS",
     "chance_level",

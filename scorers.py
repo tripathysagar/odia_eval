@@ -24,6 +24,10 @@ _LETTER_AD_RE = re.compile(r"\b([A-Da-d])\b")        # ARC / HellaSwag
 _LETTER_AE_RE = re.compile(r"\b([A-Ea-e])\b")        # ARC (one row has answerKey=E)
 _DIGIT12_RE = re.compile(r"\b([12])\b")
 _NUMBER_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+# ``\boxed{...}`` (LaTeX) — used by reasoning prompts and many CoT-tuned
+# models.  We deliberately do **not** support nested braces (benchmark
+# answers are single tokens) so ``[^{}]*?`` is enough.
+_BOXED_RE = re.compile(r"\\boxed\s*\{\s*([^{}]*?)\s*\}", re.DOTALL)
 
 # Odia numerals → ASCII
 _ODIA_DIGIT_TABLE = str.maketrans("୦୧୨୩୪୫୬୭୮୯", "0123456789")
@@ -73,6 +77,21 @@ def _letter_re(n: int) -> re.Pattern[str]:
     return re.compile(rf"\b([A-{last_upper}a-{last_lower}])\b")
 
 
+def _extract_boxed(text: str) -> str:
+    """Return the content of the **last** ``\\boxed{...}`` in ``text``.
+
+    Reasoning prompts (and many CoT-tuned models) wrap the final answer
+    in ``\\boxed{...}``.  We pick the *last* **non-empty** occurrence so
+    any "scratch" boxes in the model's intermediate work are ignored,
+    and a trailing empty ``\\boxed{}`` placeholder in the prompt text
+    (from the reasoning instruction) does not suppress fallback to legacy
+    extractors.  Returns ``""`` if no non-empty box exists.
+    """
+    matches = [m.strip() for m in _BOXED_RE.findall(text)]
+    non_empty = [m for m in matches if m]
+    return non_empty[-1] if non_empty else ""
+
+
 # ---------------------------------------------------------------------------
 # GSM8K
 # ---------------------------------------------------------------------------
@@ -80,21 +99,28 @@ def _letter_re(n: int) -> re.Pattern[str]:
 def score_gsm8k(prediction: str, row: dict[str, Any]) -> ScoreResult:
     """Extract the number after ``####`` and compare to the gold answer.
 
-    Falls back to the last standalone number in the prediction if ``####``
-    is absent (covers models that output the answer without the separator).
+    Extraction precedence:
+    1. The last ``\\boxed{...}`` in the prediction (reasoning prompts).
+    2. The number after ``####`` (legacy CoT format).
+    3. The last standalone number anywhere in the prediction.
     """
     pred_norm = _normalise(prediction)
     gold_norm = _normalise(row["odia_answer"])
 
-    # Gold: extract number after #### in the Odia answer
     gold_m = _FOUR_RE.search(gold_norm)
     gold_val = gold_m.group(1).replace(",", "") if gold_m else ""
 
-    # Prediction: prefer #### N, fall back to last number
-    pred_m = _FOUR_RE.search(pred_norm)
-    if pred_m:
-        extracted = pred_m.group(1).replace(",", "")
-    else:
+    extracted = ""
+    boxed = _extract_boxed(pred_norm)
+    if boxed:
+        nums_in_box = _NUMBER_RE.findall(boxed)
+        if nums_in_box:
+            extracted = nums_in_box[-1].replace(",", "")
+    if not extracted:
+        pred_m = _FOUR_RE.search(pred_norm)
+        if pred_m:
+            extracted = pred_m.group(1).replace(",", "")
+    if not extracted:
         nums = _NUMBER_RE.findall(pred_norm)
         extracted = nums[-1].replace(",", "") if nums else ""
 
@@ -124,15 +150,21 @@ _ARC_NUM_TO_LETTER = {"1": "A", "2": "B", "3": "C", "4": "D", "5": "E"}
 def score_arc(prediction: str, row: dict[str, Any]) -> ScoreResult:
     """Extract the first A-E letter from the prediction.
 
-    ARC datasets use both letter keys (A-E) and numeric keys (1-5); both are
-    normalised to letters before comparison.  The regex is widened to E so
-    the (rare) 5-choice rows are still scoreable.
+    ARC datasets use both letter keys (A-E) and numeric keys (1-5); both
+    are normalised to letters before comparison.  The regex is widened
+    to E so the (rare) 5-choice rows are still scoreable.
+
+    If the prediction contains ``\\boxed{...}``, the letter is taken
+    from inside the **last** box (reasoning-prompt path); otherwise the
+    full prediction is searched.
     """
     raw_key = str(row["answerKey"]).strip().upper()
     gold = _ARC_NUM_TO_LETTER.get(raw_key, raw_key)
 
     pred_norm = _normalise(prediction)
-    m = _LETTER_AE_RE.search(pred_norm)
+    boxed = _extract_boxed(pred_norm)
+    search_text = boxed if boxed else pred_norm
+    m = _LETTER_AE_RE.search(search_text)
     extracted = m.group(1).upper() if m else ""
 
     return ScoreResult(
@@ -170,7 +202,9 @@ def score_truthfulqa(prediction: str, row: dict[str, Any]) -> ScoreResult:
     gold_letter = chr(ord("A") + shuffled_gold_idx)
 
     pred_norm = _normalise(prediction)
-    m = _letter_re(n).search(pred_norm)
+    boxed = _extract_boxed(pred_norm)
+    search_text = boxed if boxed else pred_norm
+    m = _letter_re(n).search(search_text)
     extracted = m.group(1).upper() if m else ""
 
     return ScoreResult(
@@ -191,11 +225,24 @@ def score_winogrande(prediction: str, row: dict[str, Any]) -> ScoreResult:
     The prediction is run through :func:`_normalise` (Odia → ASCII digits)
     and :func:`_normalise_digit_words` (ଗୋଟିଏ/ଦୁଇ → 1/2) before extraction
     so Odia-language outputs are scored fairly.
+
+    Rows with an empty ``answer_idx`` (e.g. upstream Winogrande test, which
+    hides gold labels) are unscorable and always return ``correct=False``
+    rather than fake-matching an empty extraction against an empty gold.
     """
-    gold = str(row["answer_idx"]).strip()
+    gold = str(row.get("answer_idx", "")).strip()
+    if not gold:
+        return ScoreResult(
+            correct=False,
+            extracted="",
+            gold="",
+            prediction=prediction[:512],
+        )
 
     pred_norm = _normalise_digit_words(_normalise(prediction))
-    m = _DIGIT12_RE.search(pred_norm)
+    boxed = _extract_boxed(pred_norm)
+    search_text = boxed if boxed else pred_norm
+    m = _DIGIT12_RE.search(search_text)
     extracted = m.group(1) if m else ""
 
     return ScoreResult(
@@ -211,15 +258,36 @@ def score_winogrande(prediction: str, row: dict[str, Any]) -> ScoreResult:
 # ---------------------------------------------------------------------------
 
 def score_hellaswag(prediction: str, row: dict[str, Any]) -> ScoreResult:
-    """Extract A/B/C/D from prediction; compare to ``label`` (0-indexed)."""
+    """Extract A/B/C/D from prediction; compare to ``label`` (0-indexed).
+
+    Rows with an empty / missing ``label`` (e.g. upstream HellaSwag test,
+    which hides gold labels) are unscorable and always return
+    ``correct=False`` rather than silently defaulting gold to ``"A"`` and
+    rewarding any model that emits ``"A"``.
+    """
+    raw_label = row.get("label")
+    if raw_label in ("", None):
+        return ScoreResult(
+            correct=False,
+            extracted="",
+            gold="",
+            prediction=prediction[:512],
+        )
     try:
-        gold_idx = int(row["label"])
+        gold_idx = int(raw_label)
     except (ValueError, TypeError):
-        gold_idx = 0
+        return ScoreResult(
+            correct=False,
+            extracted="",
+            gold="",
+            prediction=prediction[:512],
+        )
     gold_letter = "ABCD"[gold_idx]
 
     pred_norm = _normalise(prediction)
-    m = _LETTER_AD_RE.search(pred_norm)
+    boxed = _extract_boxed(pred_norm)
+    search_text = boxed if boxed else pred_norm
+    m = _LETTER_AD_RE.search(search_text)
     extracted = m.group(1).upper() if m else ""
 
     return ScoreResult(
