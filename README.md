@@ -366,10 +366,10 @@ into JSONL        prompts, score outputs,  define generate_fn,
                   report accuracy           save results to JSONL
 ```
 
-Two runnable notebooks live under [`notebooks/`](../notebooks/):
+Two runnable notebooks live in the parent OdiaBench repo under [`odia_eval/notebooks/`](https://github.com/tripathysagar/OdiaBench/tree/main/odia_eval/notebooks):
 
-* [`notebooks/capability.ipynb`](../notebooks/capability.ipynb) — pure-CPU walkthrough of the `odia_eval` API (no model required). [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tripathysagar/OdiaBench/blob/main/notebooks/capability.ipynb)
-* [`notebooks/eval_odiabench.ipynb`](../notebooks/eval_odiabench.ipynb) — full 4-bit Gemma reference eval on Kaggle T4 / Colab GPU. [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tripathysagar/OdiaBench/blob/main/notebooks/eval_odiabench.ipynb)
+* [`capability.ipynb`](https://github.com/tripathysagar/OdiaBench/blob/main/odia_eval/notebooks/capability.ipynb) — pure-CPU walkthrough of the `odia_eval` API (no model required). [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tripathysagar/OdiaBench/blob/main/odia_eval/notebooks/capability.ipynb)
+* [`eval_odiabench.ipynb`](https://github.com/tripathysagar/OdiaBench/blob/main/odia_eval/notebooks/eval_odiabench.ipynb) — full 4-bit Gemma reference eval on Kaggle T4 / Colab GPU. [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tripathysagar/OdiaBench/blob/main/odia_eval/notebooks/eval_odiabench.ipynb)
 
 `odia_eval` owns everything **after** the data exists and **before** the model is defined.  
 It knows nothing about how the model was built, quantised, or trained.

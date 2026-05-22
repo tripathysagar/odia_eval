@@ -102,8 +102,6 @@ __all__ = [
     "score_report",
     "full_report",
     "to_records",
-    "_strip_prompt",
-    "_aggregate_majority_vote",
     # analysis
     "CHANCE_LEVELS",
     "chance_level",
